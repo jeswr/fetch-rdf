@@ -1,33 +1,37 @@
 /**
  * fetchRdf — GET an RDF resource and parse the body in one call.
  *
- * Wraps the caller's `fetch` (default `globalThis.fetch`), sets a
- * Solid-appropriate `Accept` header by default, and returns the parsed
- * dataset together with the strong-validator `ETag` and the raw
- * response for callers that need to read further headers.
+ * Wraps the caller's `fetch` (default `globalThis.fetch`), forces a
+ * Solid-appropriate `Accept` header, and streams the response body
+ * straight into the parser so large responses don't have to be
+ * buffered into a single string.
  *
  * @packageDocumentation
  */
 
-import { parseRdf, extractMediaType } from './parse.js';
+import { parseRdf } from './parse.js';
 import { RdfFetchError } from './errors.js';
 import type { FetchRdfOptions, FetchedRdf } from './types.js';
 
 /**
- * Default `Accept` value. Turtle preferred (q=1.0 implicit) with
- * JSON-LD as a fallback, matching Solid Protocol §5.2 (the only two
- * RDF media types Solid servers must support).
+ * `Accept` header sent on every request. Turtle preferred (q=1.0
+ * implicit) with JSON-LD as a fallback, matching Solid Protocol §5.2
+ * (the only two RDF media types Solid servers must support). Not a
+ * caller-tunable option: `fetchRdf` only knows how to parse what's in
+ * {@link SUPPORTED_RDF_MEDIA_TYPES}, so any other `Accept` would be
+ * inviting a parse failure.
  */
-export const DEFAULT_ACCEPT = 'text/turtle, application/ld+json;q=0.9';
+const ACCEPT = 'text/turtle, application/ld+json;q=0.9';
 
 /**
  * Fetch an RDF resource and parse it.
  *
  * @param url - The resource URL.
  * @param options - Optional. See {@link FetchRdfOptions}.
- * @returns A {@link FetchedRdf} containing the parsed dataset, the
- *   ETag, the (lowercased, parameter-stripped) Content-Type, the final
- *   resolved URL, and the raw `Response`.
+ * @returns A {@link FetchedRdf} containing the parsed dataset and the
+ *   response headers. ETag, Content-Type, Link, etc. all live on
+ *   `headers` rather than as separate fields, so the surface stays
+ *   tight.
  * @throws {@link RdfFetchError} on transport failure, a non-2xx
  *   response, or parse failure. The error's `status`, `url`, and
  *   `contentType` fields are populated where known so callers can
@@ -38,12 +42,11 @@ export async function fetchRdf(
   options: FetchRdfOptions = {},
 ): Promise<FetchedRdf> {
   const fetchImpl = options.fetch ?? globalThis.fetch;
-  const accept = options.accept ?? DEFAULT_ACCEPT;
 
   const headers = new Headers(options.headers);
-  // Always force the caller's accept value over anything they passed in
-  // headers — `accept` is the canonical knob for this on the public API.
-  headers.set('accept', accept);
+  // Always force the canonical Solid `Accept`; any caller-supplied
+  // `accept` in `headers` is ignored.
+  headers.set('accept', ACCEPT);
 
   let response: Response;
   try {
@@ -71,30 +74,18 @@ export async function fetchRdf(
 
   const rawContentType = response.headers.get('content-type');
   const finalUrl = response.url || url;
+  const body = response.body;
 
-  let body: string;
-  try {
-    body = await response.text();
-  } catch (cause) {
-    throw new RdfFetchError(
-      `Failed to read response body from ${finalUrl}.`,
-      {
-        cause,
-        url: finalUrl,
-        ...(rawContentType !== null && { contentType: rawContentType }),
-      },
-    );
+  if (body === null) {
+    // No body — parse the empty string so we still return a (empty)
+    // dataset rather than blowing up. The Content-Type still
+    // determines whether the format is supported.
+    const dataset = await parseRdf('', rawContentType, { baseIRI: finalUrl });
+    return { dataset, headers: response.headers };
   }
 
   const dataset = await parseRdf(body, rawContentType, { baseIRI: finalUrl });
-
-  return {
-    dataset,
-    etag: response.headers.get('etag'),
-    contentType: extractMediaType(rawContentType),
-    response,
-    url: finalUrl,
-  };
+  return { dataset, headers: response.headers };
 }
 
 function errorMessage(cause: unknown): string {
