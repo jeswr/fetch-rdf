@@ -162,25 +162,18 @@ function collectIntoStore(parser: QuadTransform): Promise<Store> {
 
 /** Feed a string or web `ReadableStream<Uint8Array>` into the parser
  * one chunk at a time. The `TextDecoder` carries any partial UTF-8
- * sequence between reads so multi-byte characters split across chunks
- * decode correctly. We use the explicit reader API rather than
- * `for await` because `ReadableStream`'s async iterator isn't part of
- * the DOM lib types we ship against. */
+ * sequence between iterations so multi-byte characters split across
+ * chunks decode correctly. */
 async function pumpBody(parser: QuadTransform, body: RdfBody): Promise<void> {
   if (typeof body === 'string') {
     parser.end(body);
     return;
   }
-  const reader = body.getReader();
   try {
     const decoder = new TextDecoder();
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (value !== undefined) {
-        const text = decoder.decode(value, { stream: true });
-        if (text.length > 0) parser.write(text);
-      }
+    for await (const chunk of body) {
+      const text = decoder.decode(chunk, { stream: true });
+      if (text.length > 0) parser.write(text);
     }
     const tail = decoder.decode();
     if (tail.length > 0) parser.write(tail);
@@ -188,7 +181,5 @@ async function pumpBody(parser: QuadTransform, body: RdfBody): Promise<void> {
   } catch (err) {
     parser.destroy(err instanceof Error ? err : new Error(String(err)));
     throw err;
-  } finally {
-    reader.releaseLock();
   }
 }
