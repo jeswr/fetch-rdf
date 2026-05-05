@@ -74,17 +74,11 @@ export async function fetchRdf(
 
   const rawContentType = response.headers.get('content-type');
   const finalUrl = response.url || url;
-  const body = response.body;
-
-  if (body === null) {
-    // No body — parse the empty string so we still return a (empty)
-    // dataset rather than blowing up. The Content-Type still
-    // determines whether the format is supported.
-    const dataset = await parseRdf('', rawContentType, { baseIRI: finalUrl });
-    return { dataset, headers: response.headers };
-  }
-
-  const dataset = await parseRdf(body, rawContentType, { baseIRI: finalUrl });
+  // `response.body` is null when there's no body (e.g. 204) — fall back
+  // to an empty string so parseRdf still returns an (empty) dataset.
+  const dataset = await parseRdf(response.body ?? '', rawContentType, {
+    baseIRI: finalUrl,
+  });
   return { dataset, headers: response.headers };
 }
 
