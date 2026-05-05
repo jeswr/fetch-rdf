@@ -17,9 +17,10 @@ import type { FetchRdfOptions, FetchedRdf } from './types.js';
  * `Accept` header sent on every request. Turtle preferred (q=1.0
  * implicit) with JSON-LD as a fallback, matching Solid Protocol §5.2
  * (the only two RDF media types Solid servers must support). Not a
- * caller-tunable option: `fetchRdf` only knows how to parse what's in
- * {@link SUPPORTED_RDF_MEDIA_TYPES}, so any other `Accept` would be
- * inviting a parse failure.
+ * caller-tunable option: `fetchRdf` only knows how to parse Turtle /
+ * N-Triples / N-Quads / TriG / JSON-LD (see `SUPPORTED_RDF_MEDIA_TYPES`
+ * exported from `./parse`), so any other `Accept` would be inviting a
+ * parse failure.
  */
 const ACCEPT = 'text/turtle, application/ld+json;q=0.9';
 

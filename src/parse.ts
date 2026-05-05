@@ -18,6 +18,8 @@
  * @packageDocumentation
  */
 
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import contentType from 'content-type';
 import { Store, StreamParser } from 'n3';
 import { JsonLdParser } from 'jsonld-streaming-parser';
@@ -53,12 +55,15 @@ const JSON_LD_FAMILY = new Set<string>([
 export type RdfBody = string | ReadableStream<Uint8Array>;
 
 /** Minimal structural type for the parsers we use — both n3's
- * `StreamParser` and `JsonLdParser` are Node `Transform` streams. */
+ * `StreamParser` and `JsonLdParser` are Node `Transform` streams.
+ * Cast to `NodeJS.WritableStream` at the `pipeline` call site since
+ * the two libraries' `Transform` declarations come from different
+ * modules (Node's `stream` vs `readable-stream`) but are structurally
+ * identical at runtime. */
 interface QuadTransform {
   on(event: 'data', listener: (quad: Quad) => void): this;
   on(event: 'end', listener: () => void): this;
   on(event: 'error', listener: (err: Error) => void): this;
-  write(chunk: string): boolean;
   end(chunk?: string): void;
   destroy(error?: Error): void;
 }
@@ -160,26 +165,45 @@ function collectIntoStore(parser: QuadTransform): Promise<Store> {
   });
 }
 
-/** Feed a string or web `ReadableStream<Uint8Array>` into the parser
- * one chunk at a time. The `TextDecoder` carries any partial UTF-8
- * sequence between iterations so multi-byte characters split across
- * chunks decode correctly. */
+/** Feed a string or web `ReadableStream<Uint8Array>` into the parser.
+ *
+ * For a stream body, we decode UTF-8 chunks ourselves (n3's lexer
+ * calls `.toString()` on whatever it receives, which is broken for
+ * raw `Uint8Array`) and hand the decoded chunks to a Node `Readable`,
+ * which `pipeline` then drives into the parser.
+ *
+ * Using `pipeline` here is what makes streaming actually safe for
+ * large responses:
+ *
+ * 1. **Backpressure** — when `parser.write()` would return `false`,
+ *    `pipeline` pauses the source instead of unbounded buffering
+ *    inside the parser.
+ * 2. **Teardown** — if the parser emits `'error'` (e.g. malformed
+ *    Turtle / JSON-LD), `pipeline` destroys the source, so we stop
+ *    pulling bytes off the network the moment parsing fails. */
 async function pumpBody(parser: QuadTransform, body: RdfBody): Promise<void> {
   if (typeof body === 'string') {
     parser.end(body);
     return;
   }
-  try {
-    const decoder = new TextDecoder();
-    for await (const chunk of body) {
-      const text = decoder.decode(chunk, { stream: true });
-      if (text.length > 0) parser.write(text);
-    }
-    const tail = decoder.decode();
-    if (tail.length > 0) parser.write(tail);
-    parser.end();
-  } catch (err) {
-    parser.destroy(err instanceof Error ? err : new Error(String(err)));
-    throw err;
+  await pipeline(
+    Readable.from(decodeChunks(body), { objectMode: false }),
+    parser as unknown as NodeJS.WritableStream,
+  );
+}
+
+/** Decode a web `ReadableStream<Uint8Array>` into UTF-8 string chunks.
+ * `TextDecoder` carries any partial multi-byte sequence between
+ * iterations so characters split across chunk boundaries decode
+ * correctly. */
+async function* decodeChunks(
+  body: ReadableStream<Uint8Array>,
+): AsyncGenerator<string, void, unknown> {
+  const decoder = new TextDecoder();
+  for await (const chunk of body) {
+    const text = decoder.decode(chunk, { stream: true });
+    if (text.length > 0) yield text;
   }
+  const tail = decoder.decode();
+  if (tail.length > 0) yield tail;
 }
